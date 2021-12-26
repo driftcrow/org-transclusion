@@ -1,13 +1,36 @@
 ;;; org-transclusion-src-lines.el --- Extension -*- lexical-binding: t; -*-
 
+;; Copyright (C) 2021  Free Software Foundation, Inc.
+
+;; This program is free software: you can redistribute it and/or modify it
+;; under the terms of the GNU General Public License as published by the
+;; Free Software Foundation, either version 3 of the License, or (at your
+;; option) any later version.
+
+;; This program is distributed in the hope that it will be useful, but
+;; WITHOUT ANY WARRANTY; without even the implied warranty of
+;; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+;; General Public License for more details.
+
+;; You should have received a copy of the GNU General Public License along
+;; with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+;; Author: Noboru Ota <me@nobiot.com>
+;; Created: 24 May 2021
+;; Last modified: 4 December 2021
+
 ;;; Commentary:
+;;  This is an extension to `org-transclusion'.  When active, it adds features
+;;  for non-Org files such as program source and text files
 
 ;;; Code:
 
 (require 'org-element)
-(declare-function text-clone-make-overlay 'text-clone)
+(declare-function text-clone-make-overlay "text-clone")
 (declare-function org-transclusion-live-sync-buffers-others-default
-                  'org-transclusion)
+                  "org-transclusion")
+(declare-function org-transclusion-org-file-p
+                  "org-transclusion")
 
 ;;;; Setting up the extension
 
@@ -21,6 +44,9 @@
           #'org-transclusion-keyword-value-src)
 (add-hook 'org-transclusion-keyword-value-functions
           #'org-transclusion-keyword-value-rest)
+(add-hook 'org-transclusion-keyword-value-functions
+          #'org-transclusion-keyword-value-end)
+;; plist back to string
 (add-hook 'org-transclusion-keyword-plist-to-string-functions
           #'org-transclusion-keyword-plist-to-string-src-lines)
 
@@ -46,7 +72,12 @@ Return nil if PLIST does not contain \":src\" or \":lines\" properties."
     (append '(:tc-type "src")
             (org-transclusion-content-src-lines link plist)))
    ;; :lines needs to be the last condition to check because :src INCLUDE :lines
-   ((plist-get plist :lines)
+   ((or (plist-get plist :lines)
+	(plist-get plist :end)
+        ;; Link contains a search-option ::<string>
+        ;; and NOT for an Org file
+	(and (org-element-property :search-option link)
+             (not (org-transclusion-org-file-p (org-element-property :path link)))))
     (append '(:tc-type "lines")
             (org-transclusion-content-range-of-lines link plist)))))
 
@@ -74,32 +105,51 @@ it means from line 10 to the end of file."
   (let* ((path (org-element-property :path link))
          (search-option (org-element-property :search-option link))
          (buf (find-file-noselect path))
-         (lines (plist-get plist :lines)))
+         (lines (plist-get plist :lines))
+	 (end-search-op (plist-get plist :end)))
     (when buf
       (with-current-buffer buf
         (org-with-wide-buffer
          (let* ((start-pos (or (when search-option
                                  (save-excursion
                                    (ignore-errors
-                                     (org-link-search search-option)
-                                     (line-beginning-position))))
+				     ;; FIXME `org-link-search' does not return
+				     ;; postion when ::/regex/ and ;;number are
+				     ;; used
+                                     (if (org-link-search search-option)
+					 (line-beginning-position)))))
                                (point-min)))
-                (range (when lines (split-string lines "-")))
-                (lbeg (if range (string-to-number (car range))
-                        0))
-                (lend (if range (string-to-number (cadr range))
-                        0))
-                (beg (if (zerop lbeg) (point-min)
-                       (goto-char start-pos)
-                       (forward-line (1- lbeg))
-                       (point)))
-                (end (if (zerop lend) (point-max)
-                       (goto-char start-pos)
-                       (forward-line (1- lend))
-                       (end-of-line);; include the line
-                       ;; Ensure to include the \n into the end point
-                       (1+ (point))))
-                (content (buffer-substring-no-properties beg end)))
+		(end-pos (when end-search-op
+                           (save-excursion
+                             (ignore-errors
+			       ;; FIXME `org-link-search' does not return
+			       ;; postion when ::/regex/ and ;;number are
+			       ;; used
+                               (when (org-link-search end-search-op)
+                                 (line-beginning-position))))))
+		(range (when lines (split-string lines "-")))
+		(lbeg (if range (string-to-number (car range))
+			0))
+		(lend (if range (string-to-number (cadr range))
+			0))
+		;; This means beginning part of the range
+		;; can be mixed with search-option
+		;;; only positive number works
+		(beg  (progn (goto-char (or start-pos (point-min)))
+			     (when (> lbeg 0)(forward-line (1- lbeg)))
+			     (point)))
+		;;; This `cond' means :end prop has priority over the end
+		;;; position of the range. They don't mix.
+		(end (cond
+		      ((when (and end-pos (> end-pos beg))
+			 end-pos))
+		      ((if (zerop lend) (point-max)
+			 (goto-char start-pos)
+			 (forward-line (1- lend))
+			 (end-of-line);; include the line
+			 ;; Ensure to include the \n into the end point
+			 (1+ (point))))))
+		(content (buffer-substring-no-properties beg end)))
            (list :src-content content
                  :src-buf (current-buffer)
                  :src-beg beg
@@ -155,6 +205,15 @@ Double qutations are mandatory."
   (when (string-match ":rest +\"\\(.*\\)\"" string)
     (list :rest (org-strip-quotes (match-string 1 string)))))
 
+(defun org-transclusion-keyword-value-end (string)
+  "It is a utility function used converting a keyword STRING to plist.
+It is meant to be used by `org-transclusion-get-string-to-plist'.
+It needs to be set in `org-transclusion-get-keyword-values-hook'.
+...
+Double qutations are mandatory"
+  (when (string-match ":end +\"\\(.*\\)\"" string)
+    (list :end (org-strip-quotes (match-string 1 string)))))
+
 (defun org-transclusion-keyword-plist-to-string-src-lines (plist)
   "Convert a keyword PLIST to a string.
 This function is meant to be used as an extension for function
@@ -164,11 +223,13 @@ abnormal hook
   (let ((string nil)
         (lines (plist-get plist :lines))
         (src (plist-get plist :src))
-        (rest (plist-get plist :rest)))
+        (rest (plist-get plist :rest))
+	(end (plist-get plist :end)))
     (concat string
      (when lines (format ":lines %s" lines))
      (when src (format " :src %s" src))
-     (when rest (format " :rest \"%s\"" rest)))))
+     (when rest (format " :rest \"%s\"" rest))
+     (when end (format " :end \"%s\"" end)))))
 
 (defun org-transclusion-src-lines-p (type)
   "Return non-nil when TYPE is \"src\" or \"lines\".

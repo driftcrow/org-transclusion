@@ -1,15 +1,6 @@
 ;;; text-clone.el --- clone and live-sync text -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2020-21 Noboru Ota
-
-;; Author: Noboru Ota <me@nobiot.com>
-;; URL: https://github.com/nobiot/org-transclusion
-;; Keywords: text-clone, transclusion
-
-;; Version: 0.0.1
-;; Package-Requires: ((emacs "27.1"))
-
-;; This file is not part of GNU Emacs.
+;; Copyright (C) 2021  Free Software Foundation, Inc.
 
 ;; This program is free software: you can redistribute it and/or modify it
 ;; under the terms of the GNU General Public License as published by the
@@ -24,7 +15,18 @@
 ;; You should have received a copy of the GNU General Public License along
 ;; with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+;; Author: Noboru Ota <me@nobiot.com>
+;; Created: 22 May 2021
+;; Last modified: 4 December 2021
+
+;; Keywords: text-clone, transclusion, org-transclusion
+
+;; Version: 1.0.0
+;; Package-Requires: ((emacs "27.1"))
+
 ;;; Commentary:
+;;  This file is part of Org-transclusion
+;;  URL: https://github.com/nobiot/org-transclusion
 
 ;;;; Credits
 

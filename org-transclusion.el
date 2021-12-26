@@ -1,15 +1,6 @@
-;;; org-transclusion.el --- transclude text contents of linked target -*- lexical-binding: t; -*-
+;;; org-transclusion.el --- Transclude text content via links -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2020-21 Noboru Ota
-
-;; Author: Noboru Ota <me@nobiot.com>
-;; URL: https://github.com/nobiot/org-transclusion
-;; Keywords: org-mode, transclusion, writing
-
-;; Version: 0.2.2
-;; Package-Requires: ((emacs "27.1") (org "9.4"))
-
-;; This file is not part of GNU Emacs.
+;; Copyright (C) 2021  Free Software Foundation, Inc.
 
 ;; This program is free software: you can redistribute it and/or modify it
 ;; under the terms of the GNU General Public License as published by the
@@ -24,20 +15,23 @@
 ;; You should have received a copy of the GNU General Public License along
 ;; with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+;; Author:        Noboru Ota <me@nobiot.com>
+;; Created:       10 October 2020
+;; Last modified: 26 December 2021
+
+;; URL: https://github.com/nobiot/org-transclusion
+;; Keywords: org-mode, transclusion, writing
+
+;; Version: 1.0.1
+;; Package-Requires: ((emacs "27.1") (org "9.4"))
+
+;; This file is not part of GNU Emacs.
+
 ;;; Commentary:
 
 ;; This library is an attempt to enable transclusion with Org Mode.
 ;; Transclusion is the ability to include content from one file into
 ;; another by reference.
-
-;; It is still VERY experimental.  As it modifies your files (notes), use
-;; it with care.  The author and contributors cannot be held responsible
-;; for loss of important work.
-
-;; Org-transclusion is a buffer-local minor mode.  It is suggested to set a
-;; keybinding like this to make it easy to toggle it:
-;;     (define-key global-map (kbd "<f12>") #'org-transclusion-add)
-;;     (define-key global-map (kbd "C-c n t") #'org-transclusion-mode)
 
 ;;; Code:
 
@@ -50,7 +44,8 @@
 (require 'text-property-search)
 (require 'seq)
 (declare-function org-translusion-indent-add-properties
-                  org-transclusion-indent-mode)
+                  "org-transclusion-indent-mode")
+(defvar org-indent-mode)
 
 ;;;; Customization
 
@@ -73,9 +68,10 @@ Intended for :set property for `customize'."
   :set 'org-transclusion-set-extensions
   :type
   '(set :greedy t
-        (const :tag "src-lines: Add :src and :lines" org-transclusion-src-lines)
+        (const :tag "src-lines: Add :src and :lines for non-Org files" org-transclusion-src-lines)
+        (const :tag "font-lock: Add font-lock for Org-transclusion" org-transclusion-font-lock)
 
-        (const :tag "indent-mode: Support org-indent-mode"org-transclusion-indent-mode)
+        (const :tag "indent-mode: Support org-indent-mode" org-transclusion-indent-mode)
         (repeat :tag "Other packages" :inline t (symbol :tag "Package"))))
 
 (defcustom org-transclusion-add-all-on-activate t
@@ -91,10 +87,10 @@ Refer to variable `org-element-all-elements' for names of elements accepted."
   :type '(repeat symbol)
   :group 'org-transclusion)
 
-(defcustom org-transclusion-include-first-section nil
+(defcustom org-transclusion-include-first-section t
   "Define whether or not transclusion for Org files includes \"first section\".
 If t, the section before the first headline is
-transcluded. Default is nil."
+transcluded. Default is t."
   :type 'boolean
   :group 'org-transclusion)
 
@@ -329,6 +325,8 @@ and variables."
   (add-hook 'after-save-hook #'org-transclusion-after-save-buffer nil t)
   (add-hook 'kill-buffer-hook #'org-transclusion-before-kill nil t)
   (add-hook 'kill-emacs-hook #'org-transclusion-before-kill nil t)
+  (add-hook 'org-export-before-processing-hook
+            #'org-transclusion-inhibit-read-only nil t)
   (org-transclusion-yank-excluded-properties-set)
   (org-transclusion-load-extensions-maybe))
 
@@ -341,6 +339,8 @@ This function also removes all the transclusions in the current buffer."
   (remove-hook 'after-save-hook #'org-transclusion-after-save-buffer t)
   (remove-hook 'kill-buffer-hook #'org-transclusion-before-kill t)
   (remove-hook 'kill-emacs-hook #'org-transclusion-before-kill t)
+  (remove-hook 'org-export-before-processing-hook
+               #'org-transclusion-inhibit-read-only t)
   (org-transclusion-yank-excluded-properties-remove))
 
 ;;;###autoload
@@ -423,10 +423,7 @@ does not support all the elements.
 
 \\{org-transclusion-map}"
   (interactive)
-  (if (let ((elm (org-element-at-point)))
-        (not (and (string= "keyword" (org-element-type elm))
-                  (string= "TRANSCLUDE" (org-element-property :key elm)))))
-      (user-error "Not at a transclude keyword")
+  (when (org-transclusion-check-add)
     ;; Turn on the minor mode to load extensions before staring to add.
     (unless org-transclusion-mode
       (let ((org-transclusion-add-all-on-activate nil))
@@ -494,7 +491,11 @@ the rest of the buffer unchanged."
           (unless (or (org-transclusion-within-transclusion-p)
                       (plist-get (org-transclusion-keyword-string-to-plist)
                                  :disable-auto))
-            (org-transclusion-add))))
+            ;; Demoted-errors so that one error does not stop the whole process
+            (with-demoted-errors
+                "Not transcluded. Continue to next: %S"
+              (when (org-transclusion-add)
+                (message (format "Transcluded at point %d, line %d" (point) (org-current-line))))))))
       (goto-char marker)
       (move-marker marker nil) ; point nowhere for GC
       t)))
@@ -761,7 +762,12 @@ also flags the buffer modified and `save-buffer'.  Calling
 process to occur.  This is reqiured because during live-sync,
 some hooks that manage the clearing process are temporarily
 turned off (removed)."
-  (when (org-transclusion-remove-all)
+  ;; Remove transclusions first. To deal with an edge case where transclusions
+  ;; were added for a capture buffer -- e.g. `org-capture' or `org-roam-catpure'
+  ;; --, check is done for `buffer-file-name' to see if there is a file visited
+  ;; by the buffer. If a "temp" buffer, there is no file being visited.
+  (when (and (org-transclusion-remove-all)
+             (buffer-file-name))
     (set-buffer-modified-p t)
     (save-buffer)))
 
@@ -1166,10 +1172,14 @@ etc.)."
           (setq obj (org-element-map obj org-element-all-elements
                       #'org-transclusion-content-filter-org-only-contents
                       nil nil '(section) nil)))
-        (list :src-content (org-element-interpret-data obj)
+        ;; For Org content, an extra +1 point seems to be added to the end of
+        ;; each element in the normalized content. This adds an extra empty
+        ;; line, which we would like to remove; hence content and src-end gets
+        ;; -1 here.
+        (list :src-content (substring (org-element-interpret-data obj) 0 -1)
               :src-buf (current-buffer)
               :src-beg (point-min)
-              :src-end (point-max))))))
+              :src-end (1- (point-max)))))))
 
 (defun org-transclusion-content-filter-org-exclude-elements (data)
   "Exclude specific elements from DATA.
@@ -1196,7 +1206,7 @@ is non-nil."
       nil
     data))
 
-;;;;-----------------------------------------------------------------------------
+;;;;---------------------------------------------------------------------------
 ;;;; Functions to support non-Org-mode link types
 
 (defun org-transclusion-content-others-default (link _plist)
@@ -1292,6 +1302,29 @@ It is like `org-not-nil', but when the V is non-nil or not
 string \"nil\", return symbol t."
   (when (org-not-nil v) t))
 
+(defun org-transclusion-check-add ()
+  "Return t if `org-transclusion-add' should work on the point.
+Error if transclusion is not allowed.
+
+Currently the following cases are prevented:
+
+Case 1. Element at point is NOT #+transclude:
+        Element is in a block - e.g. example
+Case 2. #+transclude inside another transclusion"
+  (cond
+   ;; Case 1. Element at point is NOT #+transclude:
+   ((let ((elm (org-element-at-point)))
+      (not (and (string= "keyword" (org-element-type elm))
+                (string= "TRANSCLUDE" (org-element-property :key elm)))))
+    (user-error (format "Not at a transclude keyword or transclusion in a block at point %d, line %d"
+                        (point) (org-current-line))))
+   ;; Case 2. #+transclude inside another transclusion
+   ((org-transclusion-within-transclusion-p)
+    (user-error (format "Cannot transclude in another transclusion at point %d, line %d"
+                        (point) (org-current-line))))
+   (t
+    t)))
+
 (defun org-transclusion-within-transclusion-p ()
   "Return t if the current point is within a tranclusion region."
   (when (get-char-property (point) 'org-transclusion-type) t))
@@ -1338,9 +1371,9 @@ It is intended to be used for `org-transclusion-open-source' and
 
 This function relies on `org-transclusion-find-source-marker' to
 locate the position in the source buffer; thus, the same
-limitation applies. It depends on which org elements whether or
+limitation applies.  It depends on which org elements whether or
 not this function can identify the beginnning of the element at
-point. If it cannot, it will return the beginning of the
+point.  If it cannot, it will return the beginning of the
 transclusion, which can be far away from the element at point, if
 the transcluded region is large."
   (let* ((tc-elem (org-element-context))
@@ -1668,6 +1701,17 @@ When DEMOTE is non-nil, demote."
             (if demote (org-demote-subtree) (org-promote-subtree))
             (org-transclusion-promote-adjust-after)))
         (goto-char pos)))))
+
+;;-----------------------------------------------------------------------------
+;;;; Functions to support Org-export
+
+(defun org-transclusion-inhibit-read-only (&rest _args)
+  "Set `inhibit-read-only' to t for Org export functions.
+Org export may need the buffer not to contain read-only elements.
+This function is meant to be added to
+`org-export-before-processing-hook' to temporarily inhibit
+read-only."
+  (setq-local inhibit-read-only t))
 
 ;;-----------------------------------------------------------------------------
 ;;;; Functions for extensions
